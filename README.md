@@ -1,22 +1,55 @@
 # NTP Client Logger
 
+![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)
+![License](https://img.shields.io/badge/license-Apache%202.0-green)
+
 Polls an NTP appliance over SSH on a schedule and maintains a per-interface
 **client register** — one CSV row per client IP, tracking how many polls it has
 appeared in (`times_seen`), when it was last seen, and its share of the
 appliance's NTP query load (`avg_percent` / `peak_percent`). Built and tested
-against a Net.Time / SecureSync-style CLI (`show ntp <interface> clients`).
+against the ALBEDO Net.Time CLI (`show ntp <interface> clients`).
 
-Requires Python 3.9+.
+- One register file per NTP port/interface, not a growing snapshot log
+- Tracks presence, load share, and staleness per client IP over time
+- Runs one-shot; scheduled via cron (Linux/WSL) or Task Scheduler (Windows)
+- Retries transient SSH failures; refuses to silently corrupt an old-schema file
+- Optional device-info header (`show system`) written into each CSV
+
+Requires **Python 3.9+**. Runs on Linux, macOS, and Windows.
+
+## Contents
+
+- [Install](#1-install)
+- [Configure](#2-configure)
+- [Verify against your appliance](#3-verify-against-your-appliance-do-this-first)
+- [Run it](#4-run-it)
+- [Understand the output](#understanding-the-register)
+- [Schedule it](#5-schedule-it)
+- [Project layout](#project-layout)
+- [Troubleshooting](#troubleshooting)
+- [Security notes](#security-notes)
+- [License](#license)
 
 ## 1. Install
+
+**Linux / macOS:**
 
 ```bash
 python3 -m venv .venv
 ./.venv/bin/pip install -r requirements.txt
 ```
 
-All commands below call `./.venv/bin/python` directly, so they work from any
-shell without activating the venv first.
+**Windows (PowerShell):**
+
+```powershell
+python -m venv .venv
+.venv\Scripts\pip.exe install -r requirements.txt
+```
+
+All commands in this README call the venv's Python directly
+(`./.venv/bin/python` on Linux/macOS, `.venv\Scripts\python.exe` on Windows),
+so they work from any shell without activating the venv first — substitute
+whichever matches your platform as you go.
 
 ## 2. Configure
 
@@ -26,17 +59,42 @@ Copy the template and edit it (`config.yaml` is gitignored — it holds credenti
 cp config.example.yaml config.yaml
 ```
 
-- `ssh.host`, `ssh.username`, `ssh.private_key_path` (or password)
-- `interfaces`: list the physical NTP ports active on this specific appliance
-  (e.g. `ntp01`, `ntp01r`, up to 4). Each one gets its own command run and
-  its own CSV file. This is the per-environment variable — different
-  deployments will have different interface names, so it lives in config,
-  not in the script.
-- `output.csv_dir`: folder where the per-interface CSVs are written
-- `device_info_command` (optional): a command run once per session whose output
-  describes the appliance (default `show system`). Its parsed key/value output
-  is written as a `#`-comment block at the top of each CSV when the file is
-  first created. Leave blank to skip.
+Minimum you'll need to set:
+
+```yaml
+ssh:
+  host: 203.0.113.10
+  username: admin
+  private_key_path: ~/.ssh/id_ed25519   # or use `password:` instead
+
+interfaces:
+  - ntp01r
+  - ntp02r        # up to 4 — whatever's active on this appliance
+
+output:
+  csv_dir: ./data
+
+device_info_command: show system         # optional; blank to skip
+```
+
+- `interfaces`: the physical NTP ports active on **this specific** appliance
+  (e.g. `ntp01`, `ntp01r`). Each one gets its own command run and its own CSV
+  file — this is the per-environment variable, so it lives in config, not in
+  the script.
+- `output.csv_dir`: folder where the per-interface CSVs are written.
+- `device_info_command` (optional): a command run once per session whose
+  output describes the appliance (default `show system`). Its parsed
+  key/value output is written as a `#`-comment block at the top of each CSV
+  when the file is first created. Leave blank to skip.
+- `ssh.retries`, `ssh.retry_backoff_seconds`, `ssh.command_wait_seconds`:
+  tune connection retry behavior and per-command wait (increase the latter if
+  tables come back truncated). See `config.example.yaml` for the full set of
+  knobs, including `logging.log_path` and `logging.utc`.
+
+**One important behavior to know before your first scheduled run:** if
+`interfaces` contains a name the appliance doesn't recognize, that one
+interface fails but the others still log normally — see
+[Troubleshooting](#troubleshooting) for how that's reported.
 
 The command itself (`show ntp <interface> clients`) is already wired up via
 `command_template` — you shouldn't need to touch that unless the syntax
@@ -51,8 +109,7 @@ differs on your firmware version.
 This prints the raw SSH output for `device_info_command` (if set) and for every
 interface listed in `interfaces`. `--raw` is a dump only — it does not validate
 interface names or exit non-zero on a bad one; use `--dry-run` for that.
-Confirm it matches the expected table format (Address / Elapsed / % columns).
-The included parser is already built and tested against this exact format:
+Confirm it matches the expected table format (Address / Elapsed / % columns):
 
 ```
 NTP clients list ETH(P)
@@ -66,7 +123,7 @@ If your appliance's output differs at all (extra header lines, different
 column order, etc.), adjust `parse_client_list()` in `ntp_logger/parsing.py`
 accordingly.
 
-Test parsing without writing to CSV:
+Then validate for real, without writing to CSV:
 
 ```bash
 ./.venv/bin/python ntp_client_logger.py --config config.yaml --dry-run
@@ -76,7 +133,7 @@ Test parsing without writing to CSV:
 recognise a name it logs an `ERROR` (quoting the appliance's own reply) and the
 command exits non-zero, so a typo is caught before the first scheduled run.
 
-## 4. Run it for real
+## 4. Run it
 
 ```bash
 ./.venv/bin/python ntp_client_logger.py --config config.yaml
@@ -84,7 +141,14 @@ command exits non-zero, so a typo is caught before the first scheduled run.
 
 Each interface has one **register** file (e.g. `ntp_clients_ntp01r.csv`) — one
 row per client IP, not a growing log of snapshots. Every run reads the file,
-folds in the current poll, and writes it back. Columns:
+folds in the current poll, and writes it back. A row looks like this:
+
+```
+interface,address,times_seen,polls_observed,last_seen_utc,elapsed_seconds,avg_percent,peak_percent
+ntp01r,192.0.2.1,14,15,2026-09-03T22:41:10+00:00,60,61.33,94.00
+```
+
+### Understanding the register
 
 | column | meaning |
 | --- | --- |
@@ -120,31 +184,6 @@ across rows:
 Both `avg_percent` and `peak_percent` restart whenever the register is recreated,
 so give them a day or so of polls before reading into them.
 
-> **Caveat:** "absent ⇒ 0" assumes the appliance drops a client from the list 
-> when idle.
-
-> **Keep the logging host's own clock synchronised (NTP).** `last_seen_utc` and
-> the log timestamps come from *this machine's* clock, not the appliance's. If
-> the host clock drifts, `last_seen_utc` is wrong for every row. On Linux/WSL
-> check with `timedatectl` (`System clock synchronized: yes`); enable with `sudo
-> timedatectl set-ntp true` or run `chrony` / `systemd-timesyncd`. On Windows,
-> `w32tm /query /status`.
-
-> **Upgrading:** the code refuses to touch a file whose columns don't match the
-> current schema — an old append-style snapshot (`timestamp_utc,…,percent`) or a
-> register from an earlier column set. It logs an `ERROR` naming the mismatch and
-> exits non-zero without writing. Move the file aside
-> (`mv ntp_clients_ntp01r.csv ntp_clients_ntp01r.csv.bak`) and the next run
-> starts a fresh register.
-
-**Exit code:** `0` on success (a valid but empty client list still counts as
-success). `1` if the SSH session fails after retries, credentials/key are bad,
-or any configured interface name isn't recognised by the appliance — good
-interfaces are still logged in that last case. Transient connection failures are
-retried automatically (`ssh.retries`, `ssh.retry_backoff_seconds`); tune the
-per-command wait with `ssh.command_wait_seconds` if tables come back truncated.
-See `config.example.yaml` for all the knobs.
-
 If `device_info_command` is set, the top of each register carries a `#`-comment
 block with the appliance's `show system` details, e.g.:
 
@@ -162,14 +201,33 @@ The block is rewritten on every run, so it always reflects the latest `show
 system`. Point pandas at the file with `read_csv(path, comment="#")`; the stdlib
 `csv` module needs the `#` lines filtered out manually.
 
-## 5. Schedule with cron
+**Exit code:** `0` on success (a valid but empty client list still counts as
+success). `1` if the SSH session fails after retries, credentials/key are bad,
+or any configured interface name isn't recognised by the appliance — good
+interfaces are still logged in that last case.
+
+## 5. Schedule it
 
 The script is one-shot: each run polls every interface once, updates the
-registers, and exits. cron is what makes it recurring — it launches a fresh run
-on each tick. The interval is **not** in `config.yaml`; it lives in the crontab
-line itself.
+registers, and exits. The scheduler is what makes it recurring — it launches a
+fresh run on each tick. The interval is **not** in `config.yaml`; it lives in
+the scheduler entry itself.
 
-### Steps
+### Windows (Task Scheduler)
+
+1. Open **Task Scheduler** → **Create Task…**
+2. **General** tab: name it, and check "Run whether user is logged on or not"
+   if you want it to run unattended.
+3. **Triggers** tab → **New…** → set it to repeat on your chosen interval
+   (e.g. every 15 minutes, indefinitely).
+4. **Actions** tab → **New…** → **Start a program**:
+   - Program/script: full path to `.venv\Scripts\python.exe`
+   - Add arguments: `ntp_client_logger.py --config config.yaml`
+   - Start in: the project folder (so relative paths in `config.yaml` resolve)
+5. Save. Test it once with **Run** in the Task Scheduler UI before trusting the
+   schedule, and check `logging.log_path` for output.
+
+### Linux / macOS (cron)
 
 1. Open your crontab:
 
@@ -195,10 +253,9 @@ line itself.
    crontab -l
    ```
 
-### Choosing the interval
-
-The first five fields are `minute hour day-of-month month day-of-week`. Change the
-schedule by editing those; the command stays the same.
+**Choosing the interval:** the first five fields are `minute hour day-of-month
+month day-of-week`. Change the schedule by editing those; the command stays
+the same.
 
 | Cadence | Fields |
 | --- | --- |
@@ -211,20 +268,20 @@ schedule by editing those; the command stays the same.
 
 ### WSL note
 
-On WSL, cron is usually not running by default and only runs while a WSL instance
-is open:
+On WSL, cron is usually not running by default and only runs while a WSL
+instance is open:
 
 ```bash
 sudo service cron status
 sudo service cron start      # if stopped
 ```
 
-For genuinely unattended logging on Windows, either enable `systemd` in
-`/etc/wsl.conf` and `systemctl enable --now cron`, or use Windows Task Scheduler
-to invoke `wsl.exe -e /path/to/ntpLogger/.venv/bin/python3 …` on a schedule
-instead.
+For genuinely unattended logging from WSL, either enable `systemd` in
+`/etc/wsl.conf` and `systemctl enable --now cron`, or use native Windows Task
+Scheduler (above) to invoke `wsl.exe -e /path/to/ntpLogger/.venv/bin/python3 …`
+on a schedule instead.
 
-### Without cron (foreground loop)
+### Without a scheduler (foreground loop)
 
 For a quick ad-hoc poller, loop the one-shot script in the shell:
 
@@ -235,16 +292,16 @@ while true; do
 done
 ```
 
-Caveats vs. cron: it stops when the terminal closes, you log out, or the machine
-reboots (wrap it in `nohup … &`, `tmux`, or `screen` to survive a disconnect);
-there's no catch-up after downtime and no locking, though runs are short (~7 s)
-so overlap isn't a concern at sane intervals. `Ctrl-C` stops it. For anything
-long-lived, prefer cron / systemd / Task Scheduler above.
+Caveats vs. a real scheduler: it stops when the terminal closes, you log out, or
+the machine reboots (wrap it in `nohup … &`, `tmux`, or `screen` to survive a
+disconnect); there's no catch-up after downtime and no locking, though runs are
+short (~7 s) so overlap isn't a concern at sane intervals. `Ctrl-C` stops it.
+For anything long-lived, prefer cron / systemd / Task Scheduler above.
 
 ## Project layout
 
 The logic lives in the `ntp_logger/` package; `ntp_client_logger.py` at the root
-is a thin shim so the commands above (and your cron entry) keep working
+is a thin shim so the commands above (and your scheduled entry) keep working
 unchanged — `./.venv/bin/python -m ntp_logger ...` is equivalent.
 
 - `parsing.py` — parse `show ntp <iface> clients` and `show system` output
@@ -257,30 +314,69 @@ unchanged — `./.venv/bin/python -m ntp_logger ...` is equivalent.
 Appliance output formats vary by firmware; `parse_client_list()` /
 `parse_system_info()` in `parsing.py` are the parts to adjust if yours differs.
 
-## Notes
+Connection lifecycle: each run opens one fresh SSH connection, runs
+`pre_commands` → `device_info_command` → one `show ntp <iface> clients` per
+interface over a single interactive shell, then closes the shell channel and
+the connection (in a `finally`, so it closes on failure too). A retry opens a
+brand-new connection. Nothing is held open between runs, and parsing + CSV
+writing happen after the connection is already closed — total hold time is
+roughly the sum of `ssh.command_wait_seconds` (~7 s with defaults). There is no
+persistent/pooled session.
 
-- Uses SSH key auth by default (recommended over password in config.yaml).
-- Make sure the key file has correct permissions: `chmod 600 id_rsa`.
-- The script uses an interactive SSH shell (not `exec_command`), since many
-  appliance CLIs need an interactive session/menu rather than a single
-  non-interactive command. If your appliance supports a direct one-shot SSH
-  command (`ssh admin@host "show clients"`), `run_remote_session` in
-  `ntp_logger/ssh_session.py` could be simplified considerably.
-- **Connection lifecycle:** each run opens one fresh SSH connection, runs
-  `pre_commands` → `device_info_command` → one `show ntp <iface> clients` per
-  interface over a single interactive shell, then closes the shell channel and
-  the connection (in a `finally`, so it closes on failure too). A retry opens a
-  brand-new connection. Nothing is held open between runs, and parsing + CSV
-  writing happen after the connection is already closed — total hold time is
-  roughly the sum of `ssh.command_wait_seconds` (~7 s with defaults). There is
-  no persistent/pooled session.
-- Logs (connection errors, per-poll register stats) go to stdout and to
-  `logging.log_path`. Timestamps are in the host's local time by default; set
-  `logging.utc: true` to stamp them in UTC (with a ` UTC` marker) so they line up
-  with the register's `last_seen_utc` column.
+The script uses an interactive SSH shell (not `exec_command`), since many
+appliance CLIs need an interactive session/menu rather than a single
+non-interactive command. If your appliance supports a direct one-shot SSH
+command (`ssh admin@host "show clients"`), `run_remote_session` in
+`ntp_logger/ssh_session.py` could be simplified considerably.
+
+## Troubleshooting
+
+**"SSH session fails after retries"** — check `ssh.host`/credentials, and that
+the key file has correct permissions (`chmod 600 id_rsa`). Transient failures
+are retried automatically (`ssh.retries`, `ssh.retry_backoff_seconds`); if
+retries are exhausted the process exits `1`. If client tables come back
+truncated, increase `ssh.command_wait_seconds`.
+
+**"An interface in `interfaces` isn't recognised"** — `--dry-run` catches this
+before your first scheduled run: it logs an `ERROR` quoting the appliance's own
+reply and exits non-zero. In a real run, that one interface is skipped but
+every other configured interface still logs normally, and the process exits
+`1` so the failure isn't silent in your cron/Task Scheduler log.
+
+**"The tool refuses to write to an existing CSV"** — it refuses to touch a file
+whose columns don't match the current register schema (an old append-style
+snapshot, or a register from an earlier column set). It logs an `ERROR` naming
+the mismatch and exits non-zero without writing. Move the file aside
+(`mv ntp_clients_ntp01r.csv ntp_clients_ntp01r.csv.bak`) and the next run starts
+a fresh register.
+
+**"`avg_percent` looks wrong for a client that just left"** — this is expected:
+absent polls fold in as `0`, so `avg_percent` decays toward 0 over time rather
+than freezing. `peak_percent` and `last_seen_utc` are the right columns to
+check "was it ever heavy" or "how stale is this row." This assumes the
+appliance actually drops idle clients from its list rather than leaving them
+listed at `0`.
+
+**"`last_seen_utc` seems off by the wrong amount"** — that timestamp (and log
+timestamps) come from *this machine's* clock, not the appliance's. Keep the
+logging host's own clock NTP-synchronized. On Linux/WSL check with
+`timedatectl` (`System clock synchronized: yes`); enable with `sudo
+timedatectl set-ntp true` or run `chrony` / `systemd-timesyncd`. On Windows,
+`w32tm /query /status`. Set `logging.utc: true` to stamp logs in UTC so they
+line up with the register's `last_seen_utc`.
+
+## Security notes
+
+- `config.yaml` holds SSH credentials and is gitignored — don't commit it, and
+  double-check before pushing if you've copied values elsewhere.
+- Prefer `ssh.private_key_path` over `ssh.password`; restrict the key file to
+  `chmod 600`.
+- `csv_dir` and the log file reveal internal network topology (client IPs
+  talking to this appliance) — treat them with the same access control as any
+  other internal inventory data.
 
 ## License
 
 Apache License 2.0 — see [`LICENSE`](LICENSE).
 
-Copyright [year] [your name].
+Copyright 2026 Albedo Telecom.
