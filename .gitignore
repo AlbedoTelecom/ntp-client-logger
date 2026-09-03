@@ -1,0 +1,20 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+
+# runtime output (paths come from config.yaml)
+ntp_logs/
+config.yaml
+cron.log
+
+# dev-only — kept locally, not part of this deploy repo
+tests/
+pytest.ini
+.pytest_cache/
+requirements-dev.txt
+CLAUDE.md
+ntpLogger.code-workspace

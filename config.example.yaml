@@ -1,0 +1,62 @@
+# NTP Client Logger - Configuration
+#
+# Copy this file to config.yaml and fill in real values. config.yaml is
+# gitignored because it holds credentials.
+
+ssh:
+  host: "192.168.1.10"        # IP or hostname of the NTP appliance
+  port: 22
+  username: "admin"
+  # Choose ONE auth method:
+  auth_method: "key"          # "key" or "password"
+  private_key_path: "/home/youruser/.ssh/id_rsa"   # used if auth_method == "key"
+  password: ""                # used if auth_method == "password" (better: use key auth)
+
+  # Timeouts / retry (all optional; defaults shown). Bump these for a slow or
+  # distant appliance. The session is read-only, so a transient failure retries
+  # the whole connect + command run.
+  connect_timeout: 10         # seconds for the TCP connect
+  banner_timeout: 15          # seconds to wait for the SSH banner
+  auth_timeout: 15            # seconds to wait for authentication
+  retries: 3                  # total attempts on transient failure
+  retry_backoff_seconds: 5    # wait between attempts: 5s, then 10s, ...
+  command_wait_seconds: 2.0   # settle time after sending each command before
+                              # reading its output (raise if tables come back
+                              # truncated)
+
+# Physical NTP port/interface names on this specific appliance.
+# Each one gets its own "show ntp <interface> clients" command and its own CSV.
+# This appliance can have up to 4; list only the ones that are active/in use.
+interfaces:
+  #- "ntp01"
+  # - "ntp03"
+  - "ntp01r"
+  # - "ntp02r"
+
+# Command template. {interface} is filled in from the "interfaces" list above.
+command_template: "show ntp {interface} clients"
+
+# Any setup commands needed once, right after login, before "show" commands
+# work (e.g. entering a mode/menu). Their output is discarded.
+# Leave as empty list if not needed.
+pre_commands: []
+
+# Optional. A single command run once per session (after pre_commands, before
+# the per-interface commands) whose output describes the appliance itself.
+# Captured by --raw, and written as a "#"-comment block at the top of each CSV
+# when the file is first created. Leave blank or omit to skip.
+device_info_command: "show system"
+
+output:
+  csv_dir: "/home/youruser/ntp_logs"
+  # {interface} is substituted per port, e.g. ntp_clients_ntp01r.csv
+  # Each file is a client register: one row per IP, read-modify-written each poll.
+  # Columns: interface,address,times_seen,polls_observed,last_seen_utc,elapsed_seconds,avg_percent,peak_percent
+  filename_pattern: "ntp_clients_{interface}.csv"
+
+logging:
+  log_path: "/home/youruser/ntp_logs/ntp_logger.log"
+  level: "INFO"   # DEBUG, INFO, WARNING, ERROR
+  utc: false      # true = timestamp log lines in UTC (and append " UTC" to each
+                  # line), matching the register's last_seen_utc column; false =
+                  # host local time
