@@ -10,3 +10,12 @@ dist/
 ntp_logs/
 config.yaml
 cron.log
+
+# dev-only — kept locally, not part of this deploy repo
+.gitignore
+tests/
+pytest.ini
+.pytest_cache/
+requirements-dev.txt
+CLAUDE.md
+ntpLogger.code-workspace
