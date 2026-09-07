@@ -19,6 +19,11 @@ Register row schema (CSV):
                         **absent** from as ``0``. So it's the client's average
                         share of load since it was first seen — comparable
                         across rows. A client that leaves decays toward 0.
+                        Stored at full float precision (``repr``), *not* rounded:
+                        the register is read-modify-written every poll, so
+                        rounding the mean quantizes the accumulator and, once the
+                        per-poll step drops below the rounding step, freezes the
+                        decay. Round only when displaying.
 - ``peak_percent``    — the highest ``%`` ever seen for this IP (only a real
                         sighting can raise it; an absent poll never does)
 
@@ -28,6 +33,9 @@ appliance listed them.
 
 import csv
 import io
+import logging
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["REGISTER_FIELDS", "RegisterSchemaError", "load_register", "update_register", "format_register_csv"]
 
@@ -123,8 +131,15 @@ def update_register(register: dict, poll_rows: list, *, interface: str, now_iso:
             entry["peak_percent"] = max(entry["peak_percent"], pct)
         else:
             pct = 0
-        entry["avg_percent"] = round(
-            entry["avg_percent"] + (pct - entry["avg_percent"]) / entry["polls_observed"], 2
+        # incremental running mean; NOT rounded — the register is read-modify-
+        # written every poll, so rounding here quantizes the accumulator itself.
+        # Once avg/polls_observed fell below 0.005 the decay would freeze and a
+        # rarely-seen client kept an inflated avg_percent forever.
+        entry["avg_percent"] += (pct - entry["avg_percent"]) / entry["polls_observed"]
+        logger.debug(
+            "fold %s iface=%s times_seen=%d polls_observed=%d pct_this_poll=%d avg_percent=%r",
+            address, interface, entry["times_seen"], entry["polls_observed"], pct,
+            entry["avg_percent"],
         )
 
     # 2. append IPs seen for the first time this poll
@@ -159,7 +174,7 @@ def format_register_csv(register: dict) -> str:
             "polls_observed": entry["polls_observed"],
             "last_seen_utc": entry["last_seen_utc"],
             "elapsed_seconds": entry["elapsed_seconds"],
-            "avg_percent": f"{entry['avg_percent']:.2f}",
+            "avg_percent": repr(entry["avg_percent"]),
             "peak_percent": entry["peak_percent"],
         })
     return out.getvalue()
