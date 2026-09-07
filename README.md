@@ -1,13 +1,14 @@
-# NTP Client Logger
+# ALBEDO Net.Time Client Logger
 
 ![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)
 ![License](https://img.shields.io/badge/license-Apache%202.0-green)
 
-Polls an NTP appliance over SSH on a schedule and maintains a per-interface
+Polls an ALBEDO Net.Time over SSH on a schedule and maintains a per-interface
 **client register** — one CSV row per client IP, tracking how many polls it has
 appeared in (`times_seen`), when it was last seen, and its share of the
-appliance's NTP query load (`avg_percent` / `peak_percent`). Built and tested
-against the ALBEDO Net.Time CLI (`show ntp <interface> clients`).
+Net.Time's NTP query load (`avg_percent` / `peak_percent`). This tool is
+built specifically against the ALBEDO Net.Time CLI (`show ntp <interface>
+clients`) and is not expected to work against other vendors' appliances.
 
 - One register file per NTP port/interface, not a growing snapshot log
 - Tracks presence, load share, and staleness per client IP over time
@@ -21,7 +22,7 @@ Requires **Python 3.9+**. Runs on Linux, macOS, and Windows.
 
 - [Install](#1-install)
 - [Configure](#2-configure)
-- [Verify against your appliance](#3-verify-against-your-appliance-do-this-first)
+- [Verify against your Net.Time](#3-verify-against-your-nettime-do-this-first)
 - [Run it](#4-run-it)
 - [Understand the output](#understanding-the-register)
 - [Schedule it](#5-schedule-it)
@@ -69,7 +70,7 @@ ssh:
 
 interfaces:
   - ntp01r
-  - ntp02r        # up to 4 — whatever's active on this appliance
+  - ntp02r        # up to 4 — whatever's active on this Net.Time
 
 output:
   csv_dir: ./data
@@ -77,13 +78,13 @@ output:
 device_info_command: show system         # optional; blank to skip
 ```
 
-- `interfaces`: the physical NTP ports active on **this specific** appliance
+- `interfaces`: the physical NTP ports active on **this specific** Net.Time
   (e.g. `ntp01`, `ntp01r`). Each one gets its own command run and its own CSV
   file — this is the per-environment variable, so it lives in config, not in
   the script.
 - `output.csv_dir`: folder where the per-interface CSVs are written.
 - `device_info_command` (optional): a command run once per session whose
-  output describes the appliance (default `show system`). Its parsed
+  output describes the Net.Time (default `show system`). Its parsed
   key/value output is written as a `#`-comment block at the top of each CSV
   when the file is first created. Leave blank to skip.
 - `ssh.retries`, `ssh.retry_backoff_seconds`, `ssh.command_wait_seconds`:
@@ -92,7 +93,7 @@ device_info_command: show system         # optional; blank to skip
   knobs, including `logging.log_path` and `logging.utc`.
 
 **One important behavior to know before your first scheduled run:** if
-`interfaces` contains a name the appliance doesn't recognize, that one
+`interfaces` contains a name the Net.Time doesn't recognize, that one
 interface fails but the others still log normally — see
 [Troubleshooting](#troubleshooting) for how that's reported.
 
@@ -100,7 +101,7 @@ The command itself (`show ntp <interface> clients`) is already wired up via
 `command_template` — you shouldn't need to touch that unless the syntax
 differs on your firmware version.
 
-## 3. Verify against your appliance (do this first!)
+## 3. Verify against your Net.Time (do this first!)
 
 ```bash
 ./.venv/bin/python ntp_client_logger.py --config config.yaml --raw
@@ -119,7 +120,7 @@ Address                 Elapsed                  %
 4 NTP clients listed
 ```
 
-If your appliance's output differs at all (extra header lines, different
+If your Net.Time's output differs at all (extra header lines, different
 column order, etc.), adjust `parse_client_list()` in `ntp_logger/parsing.py`
 accordingly.
 
@@ -129,8 +130,8 @@ Then validate for real, without writing to CSV:
 ./.venv/bin/python ntp_client_logger.py --config config.yaml --dry-run
 ```
 
-`--dry-run` also validates the `interfaces` list: if the appliance doesn't
-recognise a name it logs an `ERROR` (quoting the appliance's own reply) and the
+`--dry-run` also validates the `interfaces` list: if the Net.Time doesn't
+recognise a name it logs an `ERROR` (quoting the Net.Time's own reply) and the
 command exits non-zero, so a typo is caught before the first scheduled run.
 
 ## 4. Run it
@@ -158,16 +159,16 @@ ntp01r,192.0.2.1,14,15,2026-09-03T22:41:10+00:00,60,61.33,94.00
 | `polls_observed` | polls since this IP was first seen (+1 **every** poll). `times_seen / polls_observed` is how consistently the client is present |
 | `last_seen_utc` | UTC timestamp of the most recent poll it appeared in |
 | `elapsed_seconds` | value from that most recent poll (frozen at last sighting) |
-| `avg_percent` | mean of the appliance's `%` over `polls_observed` polls, **counting a poll the IP was absent from as 0** (2 dp) |
+| `avg_percent` | mean of the Net.Time's `%` over `polls_observed` polls, **counting a poll the IP was absent from as 0** (2 dp) |
 | `peak_percent` | the highest `%` ever recorded for this IP — only a real sighting raises it |
 
 Every run advances every row: `polls_observed` +1 for all, and `avg_percent`
 gets this poll's `%` for IPs that are present or `0` for those that aren't. An
 absent IP's `times_seen`, `last_seen_utc`, `elapsed_seconds` and `peak_percent`
 are left alone. Row order is stable: existing rows first, new IPs appended in the
-order the appliance listed them.
+order the Net.Time listed them.
 
-The appliance's `%` is each client's share of recent NTP query load — it sums to
+The Net.Time's `%` is each client's share of recent NTP query load — it sums to
 ~100 across the listed clients and is dominated by clients in their initial
 fast-poll phase. Because absent polls fold in a `0`, `avg_percent` is the
 client's **average share of load since it was first seen**, directly comparable
@@ -185,7 +186,7 @@ Both `avg_percent` and `peak_percent` restart whenever the register is recreated
 so give them a day or so of polls before reading into them.
 
 If `device_info_command` is set, the top of each register carries a `#`-comment
-block with the appliance's `show system` details, e.g.:
+block with the Net.Time's `show system` details, e.g.:
 
 ```
 # ntp client log — device info captured (UTC 2026-09-01T22:41:10+00:00)
@@ -203,7 +204,7 @@ system`. Point pandas at the file with `read_csv(path, comment="#")`; the stdlib
 
 **Exit code:** `0` on success (a valid but empty client list still counts as
 success). `1` if the SSH session fails after retries, credentials/key are bad,
-or any configured interface name isn't recognised by the appliance — good
+or any configured interface name isn't recognised by the Net.Time — good
 interfaces are still logged in that last case.
 
 ## 5. Schedule it
@@ -311,8 +312,9 @@ unchanged — `./.venv/bin/python -m ntp_logger ...` is equivalent.
 - `config.py` — load `config.yaml`
 - `cli.py` — argument parsing, logging setup, the poll→parse→register pipeline
 
-Appliance output formats vary by firmware; `parse_client_list()` /
-`parse_system_info()` in `parsing.py` are the parts to adjust if yours differs.
+Net.Time output formats vary by firmware; `parse_client_list()` /
+`parse_system_info()` in `parsing.py` are the parts to adjust if a firmware
+revision changes the layout.
 
 Connection lifecycle: each run opens one fresh SSH connection, runs
 `pre_commands` → `device_info_command` → one `show ntp <iface> clients` per
@@ -323,11 +325,11 @@ writing happen after the connection is already closed — total hold time is
 roughly the sum of `ssh.command_wait_seconds` (~7 s with defaults). There is no
 persistent/pooled session.
 
-The script uses an interactive SSH shell (not `exec_command`), since many
-appliance CLIs need an interactive session/menu rather than a single
-non-interactive command. If your appliance supports a direct one-shot SSH
-command (`ssh admin@host "show clients"`), `run_remote_session` in
-`ntp_logger/ssh_session.py` could be simplified considerably.
+The script uses an interactive SSH shell (not `exec_command`), since the
+Net.Time CLI needs an interactive session/menu rather than a single
+non-interactive command. If a future firmware revision supports a direct
+one-shot SSH command (`ssh admin@host "show clients"`), `run_remote_session`
+in `ntp_logger/ssh_session.py` could be simplified considerably.
 
 ## Troubleshooting
 
@@ -338,7 +340,7 @@ retries are exhausted the process exits `1`. If client tables come back
 truncated, increase `ssh.command_wait_seconds`.
 
 **"An interface in `interfaces` isn't recognised"** — `--dry-run` catches this
-before your first scheduled run: it logs an `ERROR` quoting the appliance's own
+before your first scheduled run: it logs an `ERROR` quoting the Net.Time's own
 reply and exits non-zero. In a real run, that one interface is skipped but
 every other configured interface still logs normally, and the process exits
 `1` so the failure isn't silent in your cron/Task Scheduler log.
@@ -354,11 +356,11 @@ a fresh register.
 absent polls fold in as `0`, so `avg_percent` decays toward 0 over time rather
 than freezing. `peak_percent` and `last_seen_utc` are the right columns to
 check "was it ever heavy" or "how stale is this row." This assumes the
-appliance actually drops idle clients from its list rather than leaving them
+Net.Time actually drops idle clients from its list rather than leaving them
 listed at `0`.
 
 **"`last_seen_utc` seems off by the wrong amount"** — that timestamp (and log
-timestamps) come from *this machine's* clock, not the appliance's. Keep the
+timestamps) come from *this machine's* clock, not the Net.Time's. Keep the
 logging host's own clock NTP-synchronized. On Linux/WSL check with
 `timedatectl` (`System clock synchronized: yes`); enable with `sudo
 timedatectl set-ntp true` or run `chrony` / `systemd-timesyncd`. On Windows,
@@ -372,7 +374,7 @@ line up with the register's `last_seen_utc`.
 - Prefer `ssh.private_key_path` over `ssh.password`; restrict the key file to
   `chmod 600`.
 - `csv_dir` and the log file reveal internal network topology (client IPs
-  talking to this appliance) — treat them with the same access control as any
+  talking to this Net.Time) — treat them with the same access control as any
   other internal inventory data.
 
 ## License
