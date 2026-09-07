@@ -159,7 +159,7 @@ ntp01r,192.0.2.1,14,15,2026-09-03T22:41:10+00:00,60,61.33,94.00
 | `polls_observed` | polls since this IP was first seen (+1 **every** poll). `times_seen / polls_observed` is how consistently the client is present |
 | `last_seen_utc` | UTC timestamp of the most recent poll it appeared in |
 | `elapsed_seconds` | value from that most recent poll (frozen at last sighting) |
-| `avg_percent` | mean of the Net.Time's `%` over `polls_observed` polls, **counting a poll the IP was absent from as 0** (2 dp) |
+| `avg_percent` | mean of the Net.Time's `%` over `polls_observed` polls, **counting a poll the IP was absent from as 0** (stored at full precision — round it yourself for display) |
 | `peak_percent` | the highest `%` ever recorded for this IP — only a real sighting raises it |
 
 Every run advances every row: `polls_observed` +1 for all, and `avg_percent`
@@ -181,6 +181,16 @@ across rows:
   signals;
 - a flickering client's `avg_percent` sits low in proportion to how rarely it's
   actually present (`times_seen / polls_observed`).
+
+**`avg_percent` does not add up to 100 down the column** — only the Net.Time's
+live `%` does, and only within a single poll. Each row is divided by its own
+`polls_observed`, which starts when that IP was first seen, so the rows cover
+different time spans; a client that has left keeps a slowly-decaying row that
+still counts; and a brand-new client (`polls_observed` = 1) contributes its full
+current `%` with no dilution. So the column total drifts around 100 rather than
+equalling it, and runs well above 100 for a while after clients churn. For a
+"share of load right now" figure that does sum to ~100, read the Net.Time's live
+`%` (`--raw` / `--dry-run`), not the register.
 
 Both `avg_percent` and `peak_percent` restart whenever the register is recreated,
 so give them a day or so of polls before reading into them.
